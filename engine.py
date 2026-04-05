@@ -1254,11 +1254,10 @@ def generar_informe(resultado, cliente_anthropic):
 
 def resumen_por_dia(resultado):
     """
-    Retorna lista de dicts, uno por fecha, con todos los eventos Ole
-    y sus discrepancias marcadas. Para la tabla día a día de la app.
+    Retorna lista de dicts por fecha. Cada fila tiene campos explícitos
+    para hora, horario de referencia, canal Ole, canal referencia y notas.
     """
     ole_eventos      = resultado["ole_eventos"]
-    hallazgos        = resultado["hallazgos"]
     horas_error      = resultado["horas_error"]
     horas_aviso      = resultado["horas_aviso"]
     falt             = resultado["falt"]
@@ -1266,15 +1265,14 @@ def resumen_por_dia(resultado):
     e_can            = resultado["e_can"]
     fechas_a_auditar = resultado["fechas_a_auditar"]
 
-    # Índices rápidos de hallazgos por partido+fecha
     def _key(nombre, fecha):
         return (norm_str(nombre), fecha)
 
     idx_horas_error = {_key(e["partido"], e["fecha"]): e for e in horas_error}
     idx_horas_aviso = {_key(e["partido"], e["fecha"]): e for e in horas_aviso}
-    idx_scan  = {_key(e["partido"], e["fecha"]): e for e in s_can}
-    idx_ecan  = {_key(e["partido"], e["fecha"]): e for e in e_can}
-    # Faltantes: no están en Ole, los agrego como filas separadas
+    idx_scan        = {_key(e["partido"], e["fecha"]): e for e in s_can}
+    idx_ecan        = {_key(e["partido"], e["fecha"]): e for e in e_can}
+
     falt_por_fecha = {}
     for e in falt:
         falt_por_fecha.setdefault(e["fecha"], []).append(e)
@@ -1282,50 +1280,86 @@ def resumen_por_dia(resultado):
     dias = []
     for fecha in sorted(fechas_a_auditar):
         filas = []
-        # Eventos que SÍ están en Ole
+
+        # ── Eventos que SÍ están en Olé ──────────────────────────────────────
         for ev in [e for e in ole_eventos if e["date"] == fecha]:
             k = _key(ev["name"], fecha)
-            discrepancias = []
+
+            hora_ole  = ev["time"] or "?"
+            hora_ref  = ""          # hora según fuente externa
+            hora_ok   = True
+
+            canal_ole = ", ".join(ev["canales"]) if ev["canales"] else ""
+            canal_ref = ""          # canal según fuente externa
+            canal_ok  = True
+
+            notas = []
             estado = "ok"
+
+            # Horario incorrecto
             if k in idx_horas_error:
                 h = idx_horas_error[k]
-                discrepancias.append(f"⏰ Hora: Olé {h['hora_ole']} → correcto {h['hora_fuente']} ({h['diff_min']}min, {h['fuente']})")
-                estado = "error"
-            if k in idx_horas_aviso:
+                hora_ref = h["hora_fuente"]
+                hora_ok  = False
+                estado   = "error"
+                notas.append(f"fuente: {h['fuente']}")
+
+            # Aviso de horario (posible transmisión)
+            elif k in idx_horas_aviso:
                 h = idx_horas_aviso[k]
-                discrepancias.append(f"⚠️ Hora: Olé {h['hora_ole']} / grilla {h['hora_fuente']} (posible transmisión)")
+                hora_ref = h["hora_fuente"]
+                hora_ok  = None   # None = aviso, no error claro
                 if estado == "ok": estado = "aviso"
+                notas.append(f"posible inicio transmisión ({h['diff_min']}min, {h['fuente']})")
+
+            # Canal faltante (Olé no tiene canal)
             if k in idx_scan:
                 c = idx_scan[k]
-                discrepancias.append(f"📺 Canal faltante: agregar {c.get('fuentes_canales','')}")
+                canal_ref = c.get("fuentes_canales", "")
+                canal_ok  = None   # None = faltante
                 if estado == "ok": estado = "aviso"
-            if k in idx_ecan:
+                notas.append(f"fuente: {c.get('fuente','')}")
+
+            # Canal incorrecto
+            elif k in idx_ecan:
                 c = idx_ecan[k]
-                discrepancias.append(f"🔀 Canal incorrecto: tiene {', '.join(c.get('canales_ole',[]))} → correcto {c.get('fuentes_canales','')}")
-                if estado == "ok": estado = "aviso"
+                canal_ref = c.get("fuentes_canales", "")
+                canal_ok  = False
+                if estado in ("ok", "aviso"): estado = "error"
+                notas.append(f"fuente: {c.get('fuente','')}")
+
             filas.append({
-                "hora":          ev["time"] or "?",
-                "partido":       ev["name"],
-                "competicion":   ev["competition"],
-                "canales_ole":   ", ".join(ev["canales"]) if ev["canales"] else "—",
-                "estado":        estado,
-                "discrepancias": discrepancias,
-                "en_ole":        True,
+                "en_ole":    True,
+                "estado":    estado,
+                "hora_ole":  hora_ole,
+                "hora_ref":  hora_ref,
+                "hora_ok":   hora_ok,        # True=ok, False=error, None=aviso
+                "partido":   ev["name"],
+                "competicion": ev["competition"],
+                "canal_ole": canal_ole,
+                "canal_ref": canal_ref,
+                "canal_ok":  canal_ok,       # True=ok, False=error, None=faltante
+                "notas":     " · ".join(notas),
             })
-        # Eventos FALTANTES en Ole (vienen de fuentes externas)
+
+        # ── Faltantes en Olé ──────────────────────────────────────────────────
         for e in falt_por_fecha.get(fecha, []):
-            canales_ref = ", ".join(e.get("canales_ref", [])) if e.get("canales_ref") else "—"
+            canal_ref = ", ".join(e.get("canales_ref", [])) if e.get("canales_ref") else ""
             filas.append({
-                "hora":          e.get("hora") or "?",
-                "partido":       e["partido"],
-                "competicion":   e["competicion"],
-                "canales_ole":   "—",
-                "estado":        "faltante",
-                "discrepancias": [f"❌ FALTANTE en Olé — canal ref: {canales_ref} (fuente: {e['fuente']})"],
-                "en_ole":        False,
+                "en_ole":    False,
+                "estado":    "faltante",
+                "hora_ole":  e.get("hora") or "?",
+                "hora_ref":  e.get("hora") or "?",
+                "hora_ok":   True,
+                "partido":   e["partido"],
+                "competicion": e["competicion"],
+                "canal_ole": "",
+                "canal_ref": canal_ref,
+                "canal_ok":  None,
+                "notas":     f"fuente: {e['fuente']}",
             })
-        # Ordenar por hora
-        filas.sort(key=lambda x: x["hora"])
+
+        filas.sort(key=lambda x: x["hora_ole"])
         dias.append({"fecha": fecha, "filas": filas})
     return dias
 

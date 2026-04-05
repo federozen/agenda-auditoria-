@@ -299,43 +299,115 @@ with tab1:
     if not dias:
         st.info("Sin datos para mostrar.")
     else:
-        ESTADO_LABEL = {
-            "ok":       ("✅ OK",       "pill-ok"),
-            "aviso":    ("⚠️ Aviso",    "pill-aviso"),
-            "error":    ("❌ Error",    "pill-error"),
-            "faltante": ("➕ Faltante", "pill-faltante"),
+        # Filtros
+        col_f1, col_f2 = st.columns([2, 1])
+        with col_f1:
+            mostrar = st.multiselect(
+                "Mostrar",
+                ["✅ OK", "⚠️ Avisos", "❌ Errores", "➕ Faltantes"],
+                default=["⚠️ Avisos", "❌ Errores", "➕ Faltantes"],
+                label_visibility="collapsed",
+            )
+        with col_f2:
+            solo_problemas = st.toggle("Solo días con problemas", value=True)
+
+        estado_map = {
+            "✅ OK":        "ok",
+            "⚠️ Avisos":   "aviso",
+            "❌ Errores":  "error",
+            "➕ Faltantes": "faltante",
         }
+        estados_visibles = {estado_map[m] for m in mostrar}
 
         for dia in dias:
             fecha_iso = dia["fecha"]
+            filas_visibles = [f for f in dia["filas"] if f["estado"] in estados_visibles]
+
+            if not filas_visibles and solo_problemas:
+                continue
+            if not filas_visibles:
+                filas_visibles = dia["filas"]
+
             try:
                 fecha_lbl = datetime.fromisoformat(fecha_iso).strftime("%A %d/%m").capitalize()
             except Exception:
                 fecha_lbl = fecha_iso
 
-            n_ok  = sum(1 for f in dia["filas"] if f["estado"] == "ok")
-            n_err = sum(1 for f in dia["filas"] if f["estado"] in ("error","aviso","faltante"))
-            badge = f"✅ {n_ok} OK" + (f" · ⚠️ {n_err} con problemas" if n_err else "")
+            n_ok   = sum(1 for f in dia["filas"] if f["estado"] == "ok")
+            n_prob = sum(1 for f in dia["filas"] if f["estado"] != "ok")
+            badge  = f"✅ {n_ok} OK" + (f"  ·  ⚠️ {n_prob} con problemas" if n_prob else "")
 
-            with st.expander(f"**{fecha_lbl}** — {badge}", expanded=(n_err > 0)):
-                for fila in dia["filas"]:
-                    label, css = ESTADO_LABEL.get(fila["estado"], ("?", ""))
-                    canales_str = fila["canales_ole"] or "—"
+            with st.expander(f"**{fecha_lbl}** — {badge}", expanded=(n_prob > 0)):
 
-                    cols = st.columns([1, 4, 3, 3, 2])
-                    cols[0].markdown(fila["hora"])
-                    # Nombre del partido en itálica si es faltante
+                # Cabecera de columnas
+                hdr = st.columns([1, 1, 4, 3, 2, 2, 2])
+                for col, txt in zip(hdr, ["Estado","Hora","Partido","Competición",
+                                           "Horario ref","Canal Olé","Canal ref"]):
+                    col.markdown(f"**{txt}**")
+                st.markdown("---")
+
+                for fila in filas_visibles:
+                    cols = st.columns([1, 1, 4, 3, 2, 2, 2])
+
+                    # Estado
+                    if fila["estado"] == "ok":
+                        cols[0].markdown("✅")
+                    elif fila["estado"] == "aviso":
+                        cols[0].markdown("⚠️")
+                    elif fila["estado"] == "error":
+                        cols[0].markdown("❌")
+                    else:  # faltante
+                        cols[0].markdown("➕")
+
+                    # Hora Olé — resaltar si está mal
+                    hora_txt = fila["hora_ole"]
+                    if fila["hora_ok"] is False:
+                        cols[1].markdown(f":red[**{hora_txt}**]")
+                    elif fila["hora_ok"] is None:
+                        cols[1].markdown(f":orange[{hora_txt}]")
+                    else:
+                        cols[1].markdown(hora_txt)
+
+                    # Partido — itálica si es faltante
                     nombre = f"*{fila['partido']}*" if not fila["en_ole"] else fila["partido"]
-                    cols[1].markdown(nombre)
-                    cols[2].markdown(f"*{fila['competicion']}*")
-                    cols[3].markdown(canales_str)
-                    cols[4].markdown(f'<span class="{css}">{label}</span>',
-                                     unsafe_allow_html=True)
+                    cols[2].markdown(nombre)
 
-                    # Discrepancias (expandibles)
-                    if fila["discrepancias"]:
-                        for d in fila["discrepancias"]:
-                            st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;↳ {d}")
+                    # Competición
+                    cols[3].markdown(f"*{fila['competicion']}*")
+
+                    # Horario referencia
+                    if fila["hora_ref"] and fila["hora_ref"] != fila["hora_ole"]:
+                        if fila["hora_ok"] is False:
+                            cols[4].markdown(f":green[**{fila['hora_ref']}**]")
+                        else:
+                            cols[4].markdown(f":orange[{fila['hora_ref']}]")
+                    else:
+                        cols[4].markdown("—")
+
+                    # Canal Olé — resaltar si está mal o falta
+                    canal_ole = fila["canal_ole"] or "—"
+                    if fila["canal_ok"] is False:
+                        cols[5].markdown(f":red[{canal_ole}]")
+                    elif fila["canal_ok"] is None and not fila["canal_ole"]:
+                        cols[5].markdown(":gray[sin canal]")
+                    else:
+                        cols[5].markdown(canal_ole)
+
+                    # Canal referencia
+                    canal_ref = fila["canal_ref"] or ""
+                    if canal_ref:
+                        if fila["canal_ok"] is False:
+                            cols[6].markdown(f":green[**{canal_ref}**]")
+                        elif fila["canal_ok"] is None:
+                            cols[6].markdown(f":orange[{canal_ref}]")
+                        else:
+                            cols[6].markdown(canal_ref)
+                    else:
+                        cols[6].markdown("—")
+
+                    # Notas al pie de la fila si las hay
+                    if fila.get("notas"):
+                        st.caption(f"↳ {fila['notas']}")
 
 # ────────────────────────────────────────────────────────────────────────────────
 # TAB 2: Informe IA
